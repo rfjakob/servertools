@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# cd to the directory DST is in first!
+#
+# Usage example:
+# 
+# $ cd /mirrors/server1
+# $ rsync-wrapper server1:/home home
+#
+# Author: Jakob Unterwurzacher, 2013
+# License: GPLv2 or later
+
+set -eu
+
+# Example: server1:/home
+SRC=$1
+
+# Example: home
+DST=$2
+
+echo "$$ `date`" > $DST.rsync-mirror-started
+
+# "some files vanished" returns 24 even though transfer is ok.
+set +e
+# "$DST/." to prevent mistakes - directory must exist beforehand.
+rsync -ax --numeric-ids --delay-updates --delete-delay --delete-excluded \
+	--exclude-from=/mirrors/exclude.txt --log-file=$DST.rsync.log \
+	$SRC $DST/.
+RET=$?
+set -e
+
+# Only return error codes != 24.
+if [ $RET -ne 0 -a $RET -ne 24 ]
+then
+	exit $RET
+fi
+
+echo "$$ `date`" > $DST.rsync-mirror-success
+
+exit 0
