@@ -1,0 +1,100 @@
+#!/usr/bin/perl
+#
+# mysql-consisnap takes a fully consistent (including MyISAM tables!)
+# LVM snapshot of a MySQL DB.
+# It tries hard to never leave the database locked for longer than
+# neccessary. The maximum lock time is 60 seconds - if anything takes
+# longer than that the lock will be released and an error message
+# printed.
+# Needs DBI ( Debian: apt-get install libdbi-perl libdbd-mysql-perl ).
+#
+# Modus operandi:
+# 
+# 1) Flush out dirty data by executing FLUSH TABLES;
+# 2) Lock all databases to get them into a consistent state by executing
+#    FLUSH TABLES WITH READ LOCK;
+# 3) Create LVM snapshot
+# 4) Disconnect from MySQL and release the lock
+# 5) Mount snapshot
+#
+# Idea from http://www.butschek.de/fachartikel/perl-mysql-backup/
+#
+# Author: Jakob Unterwurzacher, 2013
+# License: GPLv2 or later
+
+use warnings;
+use strict;
+use DBI;
+use File::Basename;
+
+# Pull the file in before compilation. Would result in "use strict"
+# errors if not done like this.
+BEGIN { require $ARGV[0]; }
+
+my $snapdev=dirname($ORIGIN)."/$SNAPSHOTNAME";
+
+if($#ARGV == 1)
+{
+	$ARGV[1] eq "-d" or die("Invalid command line");
+	
+	exit drop_snapshot()/256;
+}
+
+# Connect to DB
+my @dbconf  = ("DBI:mysql:host=$MYSQL_HOST", $MYSQL_USER , $MYSQL_PASS);
+my $db = DBI->connect(@dbconf) or die "Could not connect to DB";
+
+# Flush #1
+$db->do('FLUSH TABLES') or die "Flush 1 failed";
+
+# Sync #1
+system("sync");
+
+# Set MySQL inactivity timeout to 60 seconds. This is a safeguard
+# against lost network connection, hung process etc.
+$db->do('SET SESSION wait_timeout=60') or die $db->errstr;
+
+# Flush + Lock
+# "Closes all open tables and locks all tables for all databases with a read
+# lock until you explicitly release the lock by executing UNLOCK TABLES."
+# [and when you disconnect]
+# http://mysqlha.blogspot.co.at/2008/07/what-exactly-does-flush-tables-with.html
+# 
+$db->do('FLUSH TABLES WITH READ LOCK') or die "Flush + Lock failed";
+
+# Sync #2
+system("sync");
+
+# Take LVM snapshot
+my $try=1;
+while( system("exec 3>&- ; lvcreate --snapshot --size '$SIZE' --name '$SNAPSHOTNAME' '$ORIGIN' > /dev/null") != 0 )
+{
+	$try<2 or die "Could not create snapshot";
+	
+	# If the snapshot already exists just drop it and try again. This
+	# makes sure a forgotten snapshot does not break your backup
+	# scripts.
+	print STDERR "Trying to drop existing snapshot and retrying...\n";
+	drop_snapshot();
+	$try++;
+}
+
+# Check if the MySQL connection is still open. If it is not, the lock
+# may have been released before taking the snapshot - which would then
+# be inconsistent.
+$db->do('SELECT 1') or die $db->errstr;
+
+# Disconnect MySQL and release the lock
+$db->disconnect();
+
+# Mount the snapshot
+system("mount $snapdev $MOUNTPOINT")==0 or die "Could not mount snapshot";
+
+# All ok - return 0
+exit 0;
+
+sub drop_snapshot
+{
+	       system("umount $snapdev");
+	return system("exec 3>&- ; lvremove -f $snapdev > /dev/null");
+}
